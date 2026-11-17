@@ -27,7 +27,36 @@ SYSTEM_PROMPT = (
 
 
 class TranslationError(Exception):
-    """사용자에게 그대로 보여줘도 되는 메시지를 담는 예외."""
+    """사용자에게 그대로 보여줘도 되는 메시지를 담는 예외. detail은 진단용 원본 오류."""
+
+    def __init__(self, message: str, detail: str | None = None):
+        super().__init__(message)
+        self.detail = detail
+
+
+def friendly_message(e: openai.APIError) -> str:
+    if isinstance(e, openai.AuthenticationError):
+        return "API 키가 올바르지 않습니다. 설정을 확인해주세요."
+    if isinstance(e, openai.NotFoundError):
+        return "모델 또는 API 주소를 찾을 수 없습니다. `MODEL_NAME`과 `OPENAI_BASE_URL`을 확인해주세요."
+    if isinstance(e, openai.RateLimitError):
+        return "요청이 너무 많거나 사용 한도를 초과했습니다. 잠시 후 다시 시도해주세요."
+    if isinstance(e, openai.APITimeoutError):
+        return f"응답 시간이 {TIMEOUT_SECONDS}초를 초과했습니다. 잠시 후 다시 시도해주세요."
+    if isinstance(e, openai.APIConnectionError):
+        return "서버에 연결할 수 없습니다. 네트워크 상태를 확인해주세요."
+    return "번역 중 오류가 발생했습니다. 잠시 후 다시 시도해주세요."
+
+
+def config_summary() -> str:
+    """DEBUG_MODE 진단용. 키 값은 노출하지 않고 길이와 출처만 알려준다."""
+    key = get_config("OPENAI_API_KEY") or ""
+    source = "환경변수/.env" if os.getenv("OPENAI_API_KEY") else "st.secrets"
+    return (
+        f"key 길이={len(key)}, 앞={key[:7]!r}, 출처={source}, "
+        f"공백/따옴표 포함={key != key.strip().strip(chr(34) + chr(39))}, "
+        f"model={get_config('MODEL_NAME')!r}, base_url={get_config('OPENAI_BASE_URL')!r}"
+    )
 
 
 def get_config(name: str) -> str | None:
@@ -64,18 +93,10 @@ def translate(text: str, target_language: str) -> str:
                 {"role": "user", "content": text},
             ],
         )
-    except openai.AuthenticationError:
-        raise TranslationError("API 키가 올바르지 않습니다. 설정을 확인해주세요.")
-    except openai.NotFoundError:
-        raise TranslationError("모델 또는 API 주소를 찾을 수 없습니다. `MODEL_NAME`과 `OPENAI_BASE_URL`을 확인해주세요.")
-    except openai.RateLimitError:
-        raise TranslationError("요청이 너무 많거나 사용 한도를 초과했습니다. 잠시 후 다시 시도해주세요.")
-    except openai.APITimeoutError:
-        raise TranslationError(f"응답 시간이 {TIMEOUT_SECONDS}초를 초과했습니다. 잠시 후 다시 시도해주세요.")
-    except openai.APIConnectionError:
-        raise TranslationError("서버에 연결할 수 없습니다. 네트워크 상태를 확인해주세요.")
-    except openai.APIError:
-        raise TranslationError("번역 중 오류가 발생했습니다. 잠시 후 다시 시도해주세요.")
+    except openai.APIError as e:
+        detail = f"{type(e).__name__}: {e}"
+        print(f"[translate] {detail} | {config_summary()}", flush=True)  # 앱 로그(Manage app)에서 확인
+        raise TranslationError(friendly_message(e), detail=detail) from e
 
     content = response.choices[0].message.content if response.choices else None
     if not content:
@@ -149,6 +170,7 @@ for col, label in zip(cols, LANGUAGES):
 if clicked:
     st.session_state.pop("result", None)
     st.session_state.pop("error", None)
+    st.session_state.pop("error_detail", None)
     if not text.strip():
         st.warning("텍스트를 입력해주세요.")
     elif too_long:
@@ -164,11 +186,14 @@ if clicked:
             st.session_state["result"] = {"language": clicked, "text": result, "source": text}
         except TranslationError as e:
             st.session_state["error"] = str(e)
+            st.session_state["error_detail"] = e.detail
         except Exception:
             st.session_state["error"] = "알 수 없는 오류가 발생했습니다. 잠시 후 다시 시도해주세요."
 
 if "error" in st.session_state:
     st.error(st.session_state["error"])
+    if get_config("DEBUG_MODE") and st.session_state.get("error_detail"):
+        st.code(f"{st.session_state['error_detail']}\n{config_summary()}", language=None, wrap_lines=True)
 
 if "result" in st.session_state:
     res = st.session_state["result"]
